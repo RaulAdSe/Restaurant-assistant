@@ -59,6 +59,7 @@ async function checkAvailability(args) {
     let available = false;
     let mesa_id = '';
     let dispo_id = '';
+    let idmesa = '';
     
     // Handle different response formats
     if (typeof res.data === 'string') {
@@ -88,10 +89,16 @@ async function checkAvailability(args) {
           dispo_id = parts[2].split(':')[1].trim();
         }
         
+        // Extract idmesa if available
+        if (parts.length > 3 && parts[3].includes('idmesa')) {
+          idmesa = parts[3].split(':')[1].trim();
+        }
+        
         return {
           available,
           mesa_id,
           dispo_id,
+          idmesa,
           result
         };
       }
@@ -287,7 +294,8 @@ async function submitReservation(reservationData, conversationDuration, startTim
             reserva_invitados: reservationData.reserva_invitados,
             reserva_telefono: reservationData.reserva_telefono,
             reserva_idMesa: reservationData.reserva_idMesa || "",
-            reserva_idDispo: reservationData.reserva_idDispo || ""
+            reserva_idDispo: reservationData.reserva_idDispo || "",
+            reserva_idmesa: reservationData.reserva_idmesa || ""
           },
           durationSeconds: conversationDuration || Math.floor((new Date() - new Date()) / 1000),
           startedAt: startTime ? startTime.toISOString() : new Date().toISOString(),
@@ -347,7 +355,8 @@ async function startChat() {
       reserva_nombre: '',
       reserva_telefono: '',
       reserva_idMesa: '',
-      reserva_idDispo: ''
+      reserva_idDispo: '',
+      reserva_idmesa: '' // Nuevo campo para el idmesa
     };
     
     // Get current date and time in Spain/Madrid timezone
@@ -485,6 +494,10 @@ Por favor, usa esta información para verificar la disponibilidad y confirmar qu
                 if (availabilityResult.dispo_id) {
                   reservationData.reserva_idDispo = availabilityResult.dispo_id;
                 }
+                // Store idmesa if available
+                if (availabilityResult.idmesa) {
+                  reservationData.reserva_idmesa = availabilityResult.idmesa;
+                }
                 
                 availabilityChecked = true;
                 
@@ -561,6 +574,7 @@ Por favor, usa esta información para verificar la disponibilidad y confirmar qu
               // Preserve mesa_id and dispo_id from availability check
               extractedData.reserva_idMesa = reservationData.reserva_idMesa || "";
               extractedData.reserva_idDispo = reservationData.reserva_idDispo || "";
+              extractedData.reserva_idmesa = reservationData.reserva_idmesa || "";
               
               // Use the combined data for the final reservation, passing the duration
               await submitReservation(extractedData, conversationDuration, conversationStartTime);
