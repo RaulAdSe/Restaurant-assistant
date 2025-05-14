@@ -133,9 +133,9 @@ async function checkAvailability(args) {
 }
 
 // Extract structured data from entire conversation
-async function extractStructuredData(threadId) {
+async function extractStructuredData(threadId, retryCount = 0, maxRetries = 3) {
   try {
-    console.log('\n📊 Analizando conversación para extraer datos...');
+    console.log(`\n📊 Analizando conversación para extraer datos... (intento ${retryCount + 1}/${maxRetries + 1})`);
     
     // Add a new message asking for structured data extraction
     await axios.post(`https://api.openai.com/v1/threads/${threadId}/messages`, {
@@ -176,9 +176,25 @@ IMPORTANTE: NO INCLUYAS NINGÚN TEXTO EXPLICATIVO, SOLO EL JSON.`,
     // Poll for run status
     let runStatus = 'queued';
     console.log('Esperando análisis...');
+    let timeout = 0;
+    const maxTimeout = 15; // Aumentado a 15 segundos para dar más tiempo
+    
     while (['queued', 'in_progress'].includes(runStatus)) {
       await new Promise(r => setTimeout(r, 1000));
       process.stdout.write('.');
+      
+      timeout++;
+      if (timeout >= maxTimeout) {
+        console.log('\n⚠️ Timeout alcanzado después de 15 segundos.');
+        
+        if (retryCount < maxRetries) {
+          console.log(`Reintentando análisis (intento ${retryCount + 2}/${maxRetries + 1})...`);
+          return extractStructuredData(threadId, retryCount + 1, maxRetries);
+        } else {
+          console.log('Se alcanzó el número máximo de intentos.');
+          return null;
+        }
+      }
       
       const status = await axios.get(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
         headers: { 
@@ -188,6 +204,11 @@ IMPORTANTE: NO INCLUYAS NINGÚN TEXTO EXPLICATIVO, SOLO EL JSON.`,
       });
       
       runStatus = status.data.status;
+      
+      // Log if status changes to an unexpected state
+      if (!['queued', 'in_progress', 'completed'].includes(runStatus)) {
+        console.log(`\n⚠️ Estado inesperado del análisis: ${runStatus}`);
+      }
     }
     console.log('\n');
     
@@ -220,9 +241,22 @@ IMPORTANTE: NO INCLUYAS NINGÚN TEXTO EXPLICATIVO, SOLO EL JSON.`,
       console.log('Respuesta del asistente:', analysisText);
     }
     
+    // Si llegamos aquí, hubo un problema con el análisis
+    if (retryCount < maxRetries) {
+      console.log('No se pudo extraer un JSON válido, reintentando...');
+      return extractStructuredData(threadId, retryCount + 1, maxRetries);
+    }
+    
     return null;
   } catch (error) {
     console.error('Error al extraer datos estructurados:', error.message);
+    
+    // Reintentar en caso de error si no se han agotado los intentos
+    if (retryCount < maxRetries) {
+      console.log(`Error en el intento ${retryCount + 1}, reintentando...`);
+      return extractStructuredData(threadId, retryCount + 1, maxRetries);
+    }
+    
     return null;
   }
 }
@@ -259,7 +293,9 @@ function extractPhone(message) {
   const phoneMatches = message.match(/\d+/g);
   if (phoneMatches && phoneMatches.length > 0) {
     // Return the longest sequence of digits
-    return phoneMatches.reduce((a, b) => a.length > b.length ? a : b);
+    const longestNumber = phoneMatches.reduce((a, b) => a.length > b.length ? a : b);
+    // Only return if it has at least 6 digits (likely a phone number)
+    return longestNumber.length >= 6 ? longestNumber : '';
   }
   return '';
 }
@@ -361,14 +397,19 @@ async function startChat() {
     
     // Get current date and time in Spain/Madrid timezone
     const now = new Date();
+    
+    // Adjust for 2-hour time difference
+    const adjustedDate = new Date(now.getTime() + (2 * 60 * 60 * 1000)); // Add 2 hours
+    
     const spainTime = new Intl.DateTimeFormat('es-ES', {
       timeZone: 'Europe/Madrid',
       dateStyle: 'full',
       timeStyle: 'long'
-    }).format(now);
+    }).format(adjustedDate);
     
-    const isoDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
-    const timeString = now.toLocaleTimeString('es-ES', {timeZone: 'Europe/Madrid'});
+    // For ISO date and time, also use the adjusted time
+    const isoDate = adjustedDate.toISOString().split('T')[0]; // YYYY-MM-DD
+    const timeString = adjustedDate.toLocaleTimeString('es-ES', {timeZone: 'Europe/Madrid'});
     
     // Send system message with current date and time
     await axios.post(`https://api.openai.com/v1/threads/${threadId}/messages`, {
@@ -403,9 +444,18 @@ Por favor, usa esta información para verificar la disponibilidad y confirmar qu
         break;
       }
       
-      // Detect if user is providing phone number
-      if (availabilityChecked && !collectedPhone && userMessage.toLowerCase().includes('telefono') || 
-          /\d{6,}/.test(userMessage)) { // Contains at least 6 digits
+      // Detect if user is providing phone number - usando el patrón más general
+      if (availabilityChecked && !collectedPhone && 
+          (userMessage.toLowerCase().includes('telefono') || 
+           userMessage.toLowerCase().includes('teléfono') ||
+           /\d{6,}/.test(userMessage))) { // Cualquier secuencia de 6+ dígitos
+        
+        // Asignar el teléfono extraído a los datos de reserva
+        const extractedPhone = extractPhone(userMessage);
+        if (extractedPhone) {
+          reservationData.reserva_telefono = extractedPhone;
+        }
+        
         collectedPhone = true;
         console.log('\n⚠️ IMPORTANTE: Antes de finalizar la reserva, asegúrate de:');
         console.log('1. Abrir tu flujo de trabajo en n8n');
@@ -538,18 +588,46 @@ Por favor, usa esta información para verificar la disponibilidad y confirmar qu
           const assistantResponse = latestMsg.content[0].text.value;
           console.log(`\n🤖 Andy: ${assistantResponse}`);
           
-          // Detect if the assistant is asking for phone number
-          if (availabilityChecked && !collectedPhone && 
-              (assistantResponse.toLowerCase().includes("teléfono") || 
-               assistantResponse.toLowerCase().includes("telefono"))) {
-            readyToFinalize = true;
-          }
-          
-          // Check if this is a confirmation message that finalizes the reservation
-          if (collectedPhone && (
+          // Mejor método para decidir cuando una reserva está completa
+          // En lugar de depender de respuestas específicas del chat
+          const isConfirmationMessage = (
               assistantResponse.toLowerCase().includes("realizo la reserva") ||
               assistantResponse.toLowerCase().includes("quedamos así") || 
-              assistantResponse.toLowerCase().includes("reserva confirmada"))) {
+              assistantResponse.toLowerCase().includes("reserva confirmada") ||
+              assistantResponse.toLowerCase().includes("reservado") ||
+              assistantResponse.toLowerCase().includes("confirmada")
+          );
+          
+          // Verificar que tengamos los datos mínimos necesarios para una reserva
+          const hasRequiredData = () => {
+            // Extraer posibles datos del mensaje actual
+            if (!reservationData.reserva_nombre) {
+              const possibleName = extractName(userMessage);
+              if (possibleName && possibleName !== userMessage) {
+                reservationData.reserva_nombre = possibleName;
+              }
+            }
+            
+            if (!reservationData.reserva_telefono) {
+              const possiblePhone = extractPhone(userMessage);
+              if (possiblePhone) {
+                reservationData.reserva_telefono = possiblePhone;
+              }
+            }
+            
+            // Verificar que tengamos los datos mínimos necesarios
+            return (
+              reservationData.reserva_fecha && 
+              reservationData.reserva_hora && 
+              reservationData.reserva_invitados && 
+              (reservationData.reserva_nombre || collectedPhone) // Si tenemos teléfono probablemente también tengamos nombre
+            );
+          };
+          
+          // Finalizar si es un mensaje de confirmación Y tenemos todos los datos necesarios
+          // O si tenemos todos los datos necesarios incluyendo teléfono
+          if ((collectedPhone && isConfirmationMessage) || 
+              (collectedPhone && hasRequiredData())) {
             
             // Show n8n alert if it hasn't been shown yet
             if (!n8nAlertShown) {
@@ -582,6 +660,29 @@ Por favor, usa esta información para verificar la disponibilidad y confirmar qu
               console.log('\n✅ ¡Reserva completada con éxito!');
             } else {
               console.log('\n⚠️ Error: No se pudieron extraer los datos necesarios de la conversación');
+              console.log('Solicitando información faltante al usuario...');
+              
+              // Añadir mensaje al thread solicitando información directa
+              await axios.post(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+                role: 'user',
+                content: `Parece que hubo un problema técnico. Por favor, confirma explícitamente la siguiente información para completar la reserva:
+1. Fecha de la reserva (YYYY-MM-DD)
+2. Hora (HH:MM)
+3. Número de personas
+4. Nombre completo
+5. Número de teléfono
+6. Cualquier solicitud especial`,
+              }, {
+                headers: { 
+                  'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+                  'Content-Type': 'application/json',
+                  'OpenAI-Beta': 'assistants=v2'
+                },
+              });
+              
+              // No finalizamos la reserva para permitir continuar la conversación
+              // El usuario tendrá otra oportunidad de proporcionar la información
+              // En un siguiente ciclo del bucle se intentará extraer y finalizar nuevamente
             }
           }
         } else {
