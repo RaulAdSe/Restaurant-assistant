@@ -318,6 +318,20 @@ async function submitReservation(reservationData, conversationDuration, startTim
       summaryText += ` Solicitudes especiales: ${reservationData.solicitudes_especiales}`;
     }
     
+    // Ajustar el tiempo de startedAt para añadir 2 horas
+    let adjustedStartTime;
+    if (startTime) {
+      // Crear una nueva fecha basada en startTime y añadir 2 horas
+      adjustedStartTime = new Date(startTime.getTime() + (2 * 60 * 60 * 1000));
+    } else {
+      // Si no hay startTime, usar la hora actual + 2 horas
+      adjustedStartTime = new Date(Date.now() + (2 * 60 * 60 * 1000));
+    }
+    
+    // Log para debug
+    console.log(`Hora original: ${startTime ? startTime.toISOString() : 'N/A'}`);
+    console.log(`Hora ajustada: ${adjustedStartTime.toISOString()}`);
+    
     const payload = {
       message: {
         analysis: {
@@ -334,7 +348,7 @@ async function submitReservation(reservationData, conversationDuration, startTim
             reserva_idmesa: reservationData.reserva_idmesa || ""
           },
           durationSeconds: conversationDuration || Math.floor((new Date() - new Date()) / 1000),
-          startedAt: startTime ? startTime.toISOString() : new Date().toISOString(),
+          startedAt: adjustedStartTime.toISOString(),
           cost: "1.99",
           type: "text"
         }
@@ -368,8 +382,9 @@ async function startChat() {
   try {
     console.log('🔄 Inicializando el asistente "Andy" del Restaurante Park...\n');
     
-    // Record conversation start time
-    const conversationStartTime = new Date();
+    // Record conversation start time with 2-hour adjustment
+    const conversationStartTime = new Date(Date.now() + (2 * 60 * 60 * 1000));
+    console.log(`Hora de inicio de conversación (ajustada): ${conversationStartTime.toISOString()}`);
     
     // Create a new thread
     const thread = await axios.post('https://api.openai.com/v1/threads', {}, {
